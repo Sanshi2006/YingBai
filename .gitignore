@@ -1,0 +1,29 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+data/runtime/
+
+# Go build and test output
+backend/bin/
+backend/coverage.out
+backend/*.exe
+
+# Front-end dependencies and build output (reserved for later upgrades)
+mobile/node_modules/
+mobile/dist/
+
+# Logs and editor files
+*.log
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+request.md
+target.md

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f6761" />
+    <meta name="description" content="纺织品鞋类消费品检测智能客服移动端" />
+    <title>智能客服</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-frame">
+      <main id="welcome-view" class="welcome-view" aria-labelledby="welcome-title">
+        <section class="welcome-hero">
+          <div class="hero-orb hero-orb-one" aria-hidden="true"></div>
+          <div class="hero-orb hero-orb-two" aria-hidden="true"></div>
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <path d="M14 7h20v6l-7 10v6.5l9.3 7.2A2.4 2.4 0 0 1 34.8 41H13.2a2.4 2.4 0 0 1-1.5-4.3l9.3-7.2V23l-7-10V7Z" />
+              <path class="brand-mark-liquid" d="M17 35.5 24 30l7 5.5H17Z" />
+            </svg>
+          </div>
+          <p class="eyebrow">检测服务 · 智能协同</p>
+          <h1 id="welcome-title">智能客服</h1>
+          <p class="hero-copy">让标准查询、业务咨询和订单跟进更轻松。</p>
+          <div class="service-pill">
+            <span class="pulse-dot"></span>
+            服务底座已就绪
+          </div>
+        </section>
+
+        <section class="identity-panel" aria-labelledby="identity-title">
+          <div class="section-heading">
+            <div>
+              <p class="step-label">开始使用</p>
+              <h2 id="identity-title">选择你的体验身份</h2>
+            </div>
+            <span class="demo-tag">演示环境</span>
+          </div>
+
+          <form id="identity-form" novalidate>
+            <label class="field-label" for="display-name">你的称呼</label>
+            <div class="text-field">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />
+              </svg>
+              <input id="display-name" name="displayName" maxlength="20" autocomplete="name" placeholder="例如：王女士" required />
+            </div>
+            <p id="name-error" class="field-error" role="alert"></p>
+
+            <fieldset class="role-fieldset">
+              <legend>访问角色</legend>
+              <div class="role-list">
+                <label class="role-card">
+                  <input type="radio" name="role" value="customer" checked />
+                  <span class="role-icon role-icon-customer" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" /></svg>
+                  </span>
+                  <span class="role-content">
+                    <strong>外部客户</strong>
+                    <small>公开知识与业务咨询</small>
+                  </span>
+                  <span class="role-check" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg>
+                  </span>
+                </label>
+
+                <label class="role-card">
+                  <input type="radio" name="role" value="service" />
+                  <span class="role-icon role-icon-service" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M4 14v-2a8 8 0 0 1 16 0v2M4 14h3v6H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 1-2Zm16 0h-3v6h2a2 2 0 0 0 2-2v-2a2 2 0 0 0-1-2ZM17 20c-1 1-2.7 1.5-5 1.5" /></svg>
+                  </span>
+                  <span class="role-content">
+                    <strong>客服人员</strong>
+                    <small>业务规范与客户服务</small>
+                  </span>
+                  <span class="role-check" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg>
+                  </span>
+                </label>
+
+                <label class="role-card">
+                  <input type="radio" name="role" value="admin" />
+                  <span class="role-icon role-icon-admin" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.7 2.8 8 7 10 4.2-2 7-5.3 7-10V6l-7-3Zm-3 9 2 2 4-5" /></svg>
+                  </span>
+                  <span class="role-content">
+                    <strong>管理员</strong>
+                    <small>系统管理与内部知识</small>
+                  </span>
+                  <span class="role-check" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
+
+            <button class="primary-button" type="submit">
+              进入智能客服
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+            </button>
+          </form>
+
+          <p class="privacy-note">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 9V7a4 4 0 0 1 8 0v2m-9 0h10v8H5V9Z" /></svg>
+            当前为演示身份选择，不代表生产级账号认证
+          </p>
+        </section>
+      </main>
+
+      <main id="chat-view" class="chat-view" aria-labelledby="chat-title" hidden>
+        <header class="chat-header">
+          <button id="back-button" class="icon-button" type="button" aria-label="返回身份选择">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <div class="agent-avatar" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M9 5h14v4l-5 7v4l6 5H8l6-5v-4L9 9V5Z" /><path class="avatar-liquid" d="m11 24 5-4 5 4H11Z" /></svg>
+          </div>
+          <div class="chat-heading">
+            <h1 id="chat-title">智能客服</h1>
+            <p id="connection-status"><span class="status-dot"></span>正在检查服务</p>
+          </div>
+          <button id="identity-button" class="identity-button" type="button" aria-label="切换身份">
+            <span id="identity-badge">客户</span>
+          </button>
+        </header>
+
+        <div id="network-banner" class="network-banner" role="status" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9a14 14 0 0 1 18 0m-15 4a9 9 0 0 1 12 0m-9 4a4 4 0 0 1 6 0M12 21h.01" /></svg>
+          服务暂时不可用，请确认后端已启动
+        </div>
+
+        <section id="message-list" class="message-list" aria-live="polite" aria-label="对话消息"></section>
+
+        <section id="quick-prompts" class="quick-prompts" aria-label="快捷提问">
+          <p>你可以这样问</p>
+          <div class="prompt-row">
+            <button type="button" data-prompt="你好，请帮我确认服务是否连通">确认服务连接</button>
+            <button type="button" data-prompt="我想了解纺织品检测服务">了解检测服务</button>
+          </div>
+        </section>
+
+        <form id="composer" class="composer">
+          <div class="composer-box">
+            <textarea id="message-input" rows="1" maxlength="500" placeholder="请输入你的问题…" aria-label="消息内容"></textarea>
+            <button id="send-button" class="send-button" type="submit" aria-label="发送消息" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 17 8-17 8 3-8-3-8Zm3 8h14" /></svg>
+            </button>
+          </div>
+          <p class="composer-tip">智能回答仅供参考，专业结论请以正式报告为准</p>
+        </form>
+      </main>
+    </div>
+  </body>
+</html>
