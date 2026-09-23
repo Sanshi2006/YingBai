@@ -20,6 +20,7 @@ mobile/dist/
 
 # Logs and editor files
 *.log
+docs/daily-log/
 .idea/
 .vscode/
 .DS_Store
