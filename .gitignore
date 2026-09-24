@@ -8,6 +8,7 @@
 *.db-shm
 *.db-wal
 data/runtime/
+data/uploads/
 
 # Go build and test output
 backend/bin/
