@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f6761" />
+    <meta name="description" content="智能客服知识文档管理" />
+    <title>文档管理 · 智能客服</title>
+    <link rel="stylesheet" href="/assets/documents.css" />
+    <script src="/assets/documents.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">知识库运维</p>
+          <h1>文档管理</h1>
+          <p>上传、筛选并维护客服知识文档</p>
+        </div>
+        <a class="back-link" href="/">返回客服</a>
+      </header>
+      <main>
+        <section class="panel upload-panel" aria-labelledby="upload-title">
+          <div class="section-heading">
+            <div><p class="section-kicker">新增知识</p><h2 id="upload-title">上传文档</h2></div>
+            <span class="format-note">PDF / TXT / MD · 最大 20 MB</span>
+          </div>
+          <form id="upload-form">
+            <label class="file-drop" for="document-file">
+              <input id="document-file" name="file" type="file" accept=".pdf,.txt,.md" required />
+              <span class="file-icon" aria-hidden="true">＋</span>
+              <span><strong id="file-label">选择需要入库的文件</strong><small>系统会自动提取、切片并向量化</small></span>
+            </label>
+            <div class="field-grid">
+              <label><span>品类</span><select name="category" required><option value="纺织">纺织</option><option value="鞋类">鞋类</option><option value="杂货">杂货</option></select></label>
+              <label><span>类型</span><select name="type" required><option value="标准">标准</option><option value="业务规范">业务规范</option><option value="FAQ">FAQ</option></select></label>
+              <label><span>权限</span><select name="permission" required><option value="公开">公开</option><option value="内部">内部</option></select></label>
+            </div>
+            <button id="upload-button" class="primary-button" type="submit">上传并处理</button>
+          </form>
+        </section>
+        <section class="panel list-panel" aria-labelledby="list-title">
+          <div class="section-heading">
+            <div><p class="section-kicker">知识资产</p><h2 id="list-title">文档列表</h2></div>
+            <span id="total-badge" class="total-badge">0 份</span>
+          </div>
+          <form id="filter-form" class="filter-form">
+            <label class="search-field"><span class="sr-only">搜索文件名</span><input name="q" type="search" maxlength="100" placeholder="搜索文件名" /></label>
+            <select name="category" aria-label="按品类筛选"><option value="">全部品类</option><option value="纺织">纺织</option><option value="鞋类">鞋类</option><option value="杂货">杂货</option></select>
+            <select name="type" aria-label="按类型筛选"><option value="">全部类型</option><option value="标准">标准</option><option value="业务规范">业务规范</option><option value="FAQ">FAQ</option></select>
+            <select name="permission" aria-label="按权限筛选"><option value="">全部权限</option><option value="公开">公开</option><option value="内部">内部</option></select>
+            <select name="status" aria-label="按状态筛选"><option value="">全部状态</option><option value="vectorized">已入库</option><option value="failed">处理失败</option></select>
+            <div class="filter-actions"><button class="secondary-button" type="submit">应用筛选</button><button id="reset-filter" class="ghost-button" type="button">重置</button></div>
+          </form>
+          <div id="page-notice" class="notice" role="status" hidden></div>
+          <div id="document-list" class="document-list" aria-live="polite"></div>
+          <nav class="pagination" aria-label="文档分页">
+            <button id="previous-page" type="button">上一页</button><span id="page-label">第 1 页</span><button id="next-page" type="button">下一页</button>
+          </nav>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

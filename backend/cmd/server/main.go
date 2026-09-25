@@ -17,6 +17,8 @@ import (
 const defaultPort = "8080"
 const defaultDatabaseURL = "postgres://yingbai:yingbai_dev_password@localhost:5432/yingbai?sslmode=disable"
 
+var defaultSQLiteDatabasePath = filepath.Join("..", "data", "runtime", "conversations.db")
+
 func main() {
 	if _, err := config.LoadDotEnv(); err != nil {
 		log.Fatalf("environment configuration failed: %v", err)
@@ -50,11 +52,32 @@ func main() {
 	defer pool.Close()
 
 	documentRepository := repository.NewPostgresDocumentRepository(pool)
+	sqliteDatabasePath := os.Getenv("SQLITE_DATABASE_PATH")
+	if sqliteDatabasePath == "" {
+		sqliteDatabasePath = defaultSQLiteDatabasePath
+	}
+	sqliteContext, cancelSQLite := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelSQLite()
+	conversationDatabase, err := database.OpenSQLite(sqliteContext, sqliteDatabasePath)
+	if err != nil {
+		log.Fatalf("conversation database initialization failed: %v", err)
+	}
+	defer conversationDatabase.Close()
+	conversationRepository := repository.NewSQLiteConversationLogRepository(conversationDatabase)
+
 	embeddingProvider, err := llm.NewOpenAICompatibleProviderFromEnv(nil)
 	if err != nil {
 		log.Fatalf("embedding provider initialization failed: %v", err)
 	}
-	engine := router.New(mobileDir, uploadDir, documentRepository, embeddingProvider)
+	chatProvider, err := llm.NewOpenAICompatibleChatProviderFromEnv(nil)
+	if err != nil {
+		log.Fatalf("chat provider initialization failed: %v", err)
+	}
+	retrievalConfiguration, err := config.LoadRetrievalConfigFromEnv()
+	if err != nil {
+		log.Fatalf("retrieval configuration failed: %v", err)
+	}
+	engine := router.New(mobileDir, uploadDir, documentRepository, conversationRepository, embeddingProvider, chatProvider, retrievalConfiguration)
 	address := "0.0.0.0:" + port
 	log.Printf("backend listening on http://%s", address)
 

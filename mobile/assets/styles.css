@@ -48,6 +48,19 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+.management-link {
+  display: flex;
+  min-height: 44px;
+  margin-top: 10px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  color: var(--brand-700);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 750;
+}
+
 svg {
   display: block;
   fill: none;
@@ -640,6 +653,60 @@ svg {
   line-height: 1.65;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.message-copy {
+  white-space: pre-wrap;
+}
+
+.citation-details {
+  margin-top: 10px;
+  border-top: 1px solid #e3ecea;
+  color: var(--ink-700);
+  white-space: normal;
+}
+
+.citation-details summary {
+  display: flex;
+  min-height: 44px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  list-style: none;
+  color: var(--brand-700);
+  font-size: 12px;
+  font-weight: 750;
+  user-select: none;
+}
+
+.citation-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.citation-details summary::after {
+  content: "⌄";
+  font-size: 17px;
+  line-height: 1;
+  transition: transform 160ms ease;
+}
+
+.citation-details[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.citation-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0 0 9px 18px;
+  color: var(--ink-600);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.citation-list li {
+  overflow-wrap: anywhere;
 }
 
 .message-row.user .message-bubble {

@@ -9,13 +9,16 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"project-for-yingbai/backend/internal/config"
 	"project-for-yingbai/backend/internal/llm"
 	"project-for-yingbai/backend/internal/model"
 	"project-for-yingbai/backend/internal/router"
@@ -47,8 +50,8 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestChatReturnsFixedMessage(t *testing.T) {
-	engine := newTestEngine("", t.TempDir())
+func TestChatReturnsFixedRefusalWithoutKnowledge(t *testing.T) {
+	engine, conversationLogger := newTestEngineWithLogger("", t.TempDir())
 	recorder := httptest.NewRecorder()
 	payload := []byte(`{"message":"你好","sessionId":"session-1","role":"customer"}`)
 	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewReader(payload))
@@ -70,10 +73,10 @@ func TestChatReturnsFixedMessage(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Answer != "底座已连通" {
+	if body.Answer != "知识库暂无依据，请转人工" {
 		t.Fatalf("unexpected answer %q", body.Answer)
 	}
-	if body.Type != "fixed" {
+	if body.Type != "refusal" {
 		t.Fatalf("unexpected response type %q", body.Type)
 	}
 	if body.SessionID != "session-1" || body.Role != "customer" {
@@ -81,6 +84,59 @@ func TestChatReturnsFixedMessage(t *testing.T) {
 	}
 	if body.Citations == nil || len(body.Citations) != 0 {
 		t.Fatalf("expected an empty citations array, got %#v", body.Citations)
+	}
+	logs := conversationLogger.entries()
+	if len(logs) != 1 {
+		t.Fatalf("expected one conversation log, got %d", len(logs))
+	}
+	if logs[0].SessionID != "session-1" || logs[0].Question != "你好" ||
+		logs[0].Answer != "知识库暂无依据，请转人工" || logs[0].AnswerType != "refusal" {
+		t.Fatalf("unexpected refusal log: %#v", logs[0])
+	}
+	if logs[0].CitationDocuments == nil || len(logs[0].CitationDocuments) != 0 || logs[0].CreatedAt.IsZero() {
+		t.Fatalf("refusal log is incomplete: %#v", logs[0])
+	}
+}
+
+func TestChatReturnsKnowledgeAnswerWithCitations(t *testing.T) {
+	repository := newMemoryDocumentRepository()
+	repository.searchResults = []model.RetrievedChunk{{
+		DocumentID: "doc-1", OriginalName: "样品接收规范.md", Permission: "公开",
+		ChunkIndex: 0, Content: "包装破损时应暂停流转并记录异常。", Similarity: 0.91,
+	}}
+	chatProvider := llm.NewFakeChatLLMProvider("样品包装破损时如何处理？", "应暂停流转并记录异常。[S1]")
+	conversationLogger := newMemoryConversationLogger()
+	engine := router.New("", t.TempDir(), repository, conversationLogger, mustFakeProvider(), chatProvider, testRetrievalConfig())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(`{"message":"包装破了咋办？","sessionId":"session-2","role":"customer"}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Answer    string `json:"answer"`
+		Type      string `json:"type"`
+		Citations []struct {
+			SourceID     string `json:"sourceId"`
+			OriginalName string `json:"originalName"`
+		} `json:"citations"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Type != "knowledge" || body.Answer != "应暂停流转并记录异常。[S1]" {
+		t.Fatalf("unexpected knowledge response: %#v", body)
+	}
+	if len(body.Citations) != 1 || body.Citations[0].SourceID != "S1" || body.Citations[0].OriginalName != "样品接收规范.md" {
+		t.Fatalf("unexpected citations: %#v", body.Citations)
+	}
+	logs := conversationLogger.entries()
+	if len(logs) != 1 || logs[0].AnswerType != "knowledge" ||
+		len(logs[0].CitationDocuments) != 1 || logs[0].CitationDocuments[0] != "样品接收规范.md" {
+		t.Fatalf("unexpected knowledge answer log: %#v", logs)
 	}
 }
 
@@ -109,6 +165,39 @@ func TestChatRejectsMissingMessage(t *testing.T) {
 	}
 }
 
+func TestChatRejectsMissingSessionID(t *testing.T) {
+	engine := newTestEngine("", t.TempDir())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(`{"message":"你好","role":"customer"}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	assertErrorCode(t, recorder, "INVALID_REQUEST")
+}
+
+func TestChatReturnsStableErrorWhenConversationLogFails(t *testing.T) {
+	repository := newMemoryDocumentRepository()
+	conversationLogger := newMemoryConversationLogger()
+	conversationLogger.err = errors.New("simulated SQLite write failure")
+	engine := router.New("", t.TempDir(), repository, conversationLogger, mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(
+		`{"message":"你好","sessionId":"session-log-failure","role":"customer"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+	}
+	assertErrorCode(t, recorder, "CHAT_LOG_FAILED")
+}
+
 func TestMobileHome(t *testing.T) {
 	mobileDir, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile"))
 	if err != nil {
@@ -132,6 +221,26 @@ func TestMobileHome(t *testing.T) {
 	}
 }
 
+func TestDocumentManagementPage(t *testing.T) {
+	mobileDir, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile"))
+	if err != nil {
+		t.Fatalf("resolve mobile directory: %v", err)
+	}
+	engine := newTestEngine(mobileDir, t.TempDir())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/documents", nil)
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "文档管理") ||
+		!strings.Contains(recorder.Body.String(), "/assets/documents.js") {
+		t.Fatal("document management page did not include expected content")
+	}
+}
+
 func TestDocumentUploadAcceptsAllowedFormats(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -149,7 +258,7 @@ func TestDocumentUploadAcceptsAllowedFormats(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			uploadDir := t.TempDir()
 			repository := newMemoryDocumentRepository()
-			engine := router.New("", uploadDir, repository, mustFakeProvider())
+			engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
 			request := newDocumentUploadRequest(t, testCase.filename, testCase.content)
 			recorder := httptest.NewRecorder()
 
@@ -230,7 +339,7 @@ func TestDocumentUploadAcceptsAllowedFormats(t *testing.T) {
 	}
 }
 
-func TestDocumentUploadRejectsUnextractableContent(t *testing.T) {
+func TestDocumentUploadPreservesFailedExtractionForRetry(t *testing.T) {
 	testCases := []struct {
 		name      string
 		filename  string
@@ -260,17 +369,17 @@ func TestDocumentUploadRejectsUnextractableContent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read upload directory: %v", err)
 			}
-			if len(entries) != 0 {
-				t.Fatalf("failed extraction should leave no files, found %d", len(entries))
+			if len(entries) != 1 {
+				t.Fatalf("failed extraction should preserve one original file, found %d", len(entries))
 			}
 		})
 	}
 }
 
-func TestDocumentUploadCleansUpWhenEmbeddingFails(t *testing.T) {
+func TestDocumentUploadRecordsEmbeddingFailureForRetry(t *testing.T) {
 	uploadDir := t.TempDir()
 	repository := newMemoryDocumentRepository()
-	engine := router.New("", uploadDir, repository, failingLLMProvider{})
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), failingLLMProvider{}, mustFakeChatProvider(), testRetrievalConfig())
 	request := newDocumentUploadRequest(t, "embedding-failure.txt", []byte("valid extracted content"))
 	recorder := httptest.NewRecorder()
 
@@ -284,15 +393,16 @@ func TestDocumentUploadCleansUpWhenEmbeddingFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read upload directory: %v", err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("failed embedding should leave no files, found %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("failed embedding should preserve one original file, found %d", len(entries))
 	}
-	documents, err := repository.List(context.Background())
+	result, err := repository.List(context.Background(), model.DocumentListFilter{Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("list repository documents: %v", err)
 	}
-	if len(documents) != 0 {
-		t.Fatalf("failed embedding should leave no metadata, found %d", len(documents))
+	if len(result.Documents) != 1 || result.Documents[0].Status != "failed" ||
+		!strings.Contains(result.Documents[0].ProcessingError, "EMBEDDING_FAILED") {
+		t.Fatalf("failed embedding state was not persisted: %#v", result.Documents)
 	}
 }
 
@@ -345,7 +455,7 @@ func TestDocumentUploadValidatesBusinessMetadata(t *testing.T) {
 func TestDocumentListPersistsAcrossRouterRestart(t *testing.T) {
 	uploadDir := t.TempDir()
 	repository := newMemoryDocumentRepository()
-	engine := router.New("", uploadDir, repository, mustFakeProvider())
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
 	uploads := []struct {
 		filename   string
 		category   string
@@ -360,7 +470,7 @@ func TestDocumentListPersistsAcrossRouterRestart(t *testing.T) {
 		request := newDocumentUploadRequestWithMetadata(
 			t,
 			upload.filename,
-			[]byte("sample content"),
+			[]byte("sample content "+upload.filename),
 			upload.category,
 			upload.docType,
 			upload.permission,
@@ -372,7 +482,7 @@ func TestDocumentListPersistsAcrossRouterRestart(t *testing.T) {
 		}
 	}
 
-	restartedEngine := router.New("", uploadDir, repository, mustFakeProvider())
+	restartedEngine := router.New("", uploadDir, repository, newMemoryConversationLogger(), mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/documents", nil)
 	restartedEngine.ServeHTTP(recorder, request)
@@ -433,8 +543,205 @@ func TestDocumentListReturnsEmptyCollection(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
-	if recorder.Body.String() != "{\"documents\":[],\"total\":0}" {
-		t.Fatalf("unexpected empty list response: %s", recorder.Body.String())
+	var body model.DocumentListResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode empty list response: %v", err)
+	}
+	if body.Documents == nil || len(body.Documents) != 0 || body.Total != 0 ||
+		body.Page != 1 || body.PageSize != 20 || body.TotalPages != 0 {
+		t.Fatalf("unexpected empty list response: %#v", body)
+	}
+}
+
+func TestDocumentUploadRejectsDuplicateContent(t *testing.T) {
+	uploadDir := t.TempDir()
+	repository := newMemoryDocumentRepository()
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
+	content := []byte("完全相同的知识内容")
+
+	firstRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(firstRecorder, newDocumentUploadRequest(t, "original.txt", content))
+	if firstRecorder.Code != http.StatusCreated {
+		t.Fatalf("first upload failed: %d %s", firstRecorder.Code, firstRecorder.Body.String())
+	}
+	var firstBody struct {
+		Document model.DocumentUpload `json:"document"`
+	}
+	if err := json.Unmarshal(firstRecorder.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first upload: %v", err)
+	}
+
+	duplicateRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(duplicateRecorder, newDocumentUploadRequest(t, "renamed.md", content))
+	if duplicateRecorder.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate status %d, got %d: %s", http.StatusConflict, duplicateRecorder.Code, duplicateRecorder.Body.String())
+	}
+	var duplicateBody struct {
+		Error struct {
+			Code       string `json:"code"`
+			DocumentID string `json:"documentId"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(duplicateRecorder.Body.Bytes(), &duplicateBody); err != nil {
+		t.Fatalf("decode duplicate response: %v", err)
+	}
+	if duplicateBody.Error.Code != "DUPLICATE_DOCUMENT" || duplicateBody.Error.DocumentID != firstBody.Document.ID {
+		t.Fatalf("unexpected duplicate response: %#v", duplicateBody)
+	}
+	entries, err := os.ReadDir(uploadDir)
+	if err != nil {
+		t.Fatalf("read upload directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("duplicate upload should keep exactly one file, got %d", len(entries))
+	}
+}
+
+func TestDocumentListSupportsPaginationAndFilters(t *testing.T) {
+	uploadDir := t.TempDir()
+	repository := newMemoryDocumentRepository()
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), mustFakeProvider(), mustFakeChatProvider(), testRetrievalConfig())
+	uploads := []struct {
+		name, content, category, docType, permission string
+	}{
+		{"alpha-public.md", "alpha 公开知识", "纺织", "FAQ", "公开"},
+		{"alpha-internal.txt", "alpha 内部知识", "纺织", "业务规范", "内部"},
+		{"beta-public.txt", "beta 鞋类知识", "鞋类", "标准", "公开"},
+	}
+	for _, upload := range uploads {
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, newDocumentUploadRequestWithMetadata(
+			t, upload.name, []byte(upload.content), upload.category, upload.docType, upload.permission,
+		))
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("upload %s failed: %d %s", upload.name, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	query := url.Values{
+		"page":       {"1"},
+		"pageSize":   {"1"},
+		"q":          {"alpha"},
+		"category":   {"纺织"},
+		"permission": {"公开"},
+		"status":     {"vectorized"},
+	}
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/documents?"+query.Encode(), nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("filtered list failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var result model.DocumentListResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode filtered list: %v", err)
+	}
+	if result.Total != 1 || result.Page != 1 || result.PageSize != 1 ||
+		result.TotalPages != 1 || len(result.Documents) != 1 ||
+		result.Documents[0].OriginalName != "alpha-public.md" {
+		t.Fatalf("unexpected filtered page: %#v", result)
+	}
+
+	invalidRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(invalidRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/documents?pageSize=101", nil))
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid filter status %d, got %d", http.StatusBadRequest, invalidRecorder.Code)
+	}
+	assertErrorCode(t, invalidRecorder, "INVALID_DOCUMENT_FILTER")
+}
+
+func TestFailedDocumentCanBeRetried(t *testing.T) {
+	uploadDir := t.TempDir()
+	repository := newMemoryDocumentRepository()
+	provider := newRecoverableLLMProvider(true)
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), provider, mustFakeChatProvider(), testRetrievalConfig())
+	uploadRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(uploadRecorder, newDocumentUploadRequest(t, "retry.txt", []byte("可重试的有效文本")))
+	if uploadRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected failed upload status %d, got %d: %s", http.StatusBadGateway, uploadRecorder.Code, uploadRecorder.Body.String())
+	}
+	var failedBody struct {
+		Error struct {
+			DocumentID string `json:"documentId"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(uploadRecorder.Body.Bytes(), &failedBody); err != nil {
+		t.Fatalf("decode failed upload: %v", err)
+	}
+	if failedBody.Error.DocumentID == "" {
+		t.Fatal("failed upload did not return a retryable document id")
+	}
+
+	provider.setFail(false)
+	retryRecorder := httptest.NewRecorder()
+	retryRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/documents/"+failedBody.Error.DocumentID+"/retry",
+		nil,
+	)
+	engine.ServeHTTP(retryRecorder, retryRequest)
+	if retryRecorder.Code != http.StatusOK {
+		t.Fatalf("retry failed: %d %s", retryRecorder.Code, retryRecorder.Body.String())
+	}
+	var retryBody struct {
+		Document model.DocumentUpload `json:"document"`
+	}
+	if err := json.Unmarshal(retryRecorder.Body.Bytes(), &retryBody); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if retryBody.Document.Status != "vectorized" || retryBody.Document.ProcessingError != "" ||
+		retryBody.Document.ChunkCount == 0 {
+		t.Fatalf("unexpected retried document: %#v", retryBody.Document)
+	}
+}
+
+func TestDocumentCanBeRevectorizedAndDeleted(t *testing.T) {
+	uploadDir := t.TempDir()
+	repository := newMemoryDocumentRepository()
+	provider := newRecoverableLLMProvider(false)
+	engine := router.New("", uploadDir, repository, newMemoryConversationLogger(), provider, mustFakeChatProvider(), testRetrievalConfig())
+	uploadRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(uploadRecorder, newDocumentUploadRequest(t, "managed.md", []byte("# 可维护知识\n\n正文内容。")))
+	if uploadRecorder.Code != http.StatusCreated {
+		t.Fatalf("upload failed: %d %s", uploadRecorder.Code, uploadRecorder.Body.String())
+	}
+	var uploadBody struct {
+		Document model.DocumentUpload `json:"document"`
+	}
+	if err := json.Unmarshal(uploadRecorder.Body.Bytes(), &uploadBody); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	revectorizeRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(revectorizeRecorder, httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/documents/"+uploadBody.Document.ID+"/revectorize",
+		nil,
+	))
+	if revectorizeRecorder.Code != http.StatusOK {
+		t.Fatalf("revectorize failed: %d %s", revectorizeRecorder.Code, revectorizeRecorder.Body.String())
+	}
+	if provider.callCount() != 2 {
+		t.Fatalf("expected embedding provider to be called twice, got %d", provider.callCount())
+	}
+
+	deleteRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(deleteRecorder, httptest.NewRequest(
+		http.MethodDelete,
+		"/api/v1/documents/"+uploadBody.Document.ID,
+		nil,
+	))
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("delete failed: %d %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	if _, exists, err := repository.FindByID(context.Background(), uploadBody.Document.ID); err != nil || exists {
+		t.Fatalf("deleted document still exists: exists=%v err=%v", exists, err)
+	}
+	entries, err := os.ReadDir(uploadDir)
+	if err != nil {
+		t.Fatalf("read upload directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("delete should remove the original file, found %d entries", len(entries))
 	}
 }
 
@@ -539,17 +846,36 @@ func assertErrorCode(t *testing.T, recorder *httptest.ResponseRecorder, expected
 }
 
 type memoryDocumentRepository struct {
-	mu        sync.Mutex
-	documents []model.DocumentUpload
-	chunks    map[string][]model.DocumentChunk
+	mu            sync.Mutex
+	documents     []model.DocumentUpload
+	chunks        map[string][]model.DocumentChunk
+	hashes        map[string]string
+	searchResults []model.RetrievedChunk
 }
 
 func newMemoryDocumentRepository() *memoryDocumentRepository {
-	return &memoryDocumentRepository{chunks: make(map[string][]model.DocumentChunk)}
+	return &memoryDocumentRepository{
+		chunks: make(map[string][]model.DocumentChunk),
+		hashes: make(map[string]string),
+	}
 }
 
 func newTestEngine(mobileDir, uploadDir string) http.Handler {
-	return router.New(mobileDir, uploadDir, newMemoryDocumentRepository(), mustFakeProvider())
+	engine, _ := newTestEngineWithLogger(mobileDir, uploadDir)
+	return engine
+}
+
+func newTestEngineWithLogger(mobileDir, uploadDir string) (http.Handler, *memoryConversationLogger) {
+	conversationLogger := newMemoryConversationLogger()
+	return router.New(
+		mobileDir,
+		uploadDir,
+		newMemoryDocumentRepository(),
+		conversationLogger,
+		mustFakeProvider(),
+		mustFakeChatProvider(),
+		testRetrievalConfig(),
+	), conversationLogger
 }
 
 func mustFakeProvider() llm.LLMProvider {
@@ -558,6 +884,14 @@ func mustFakeProvider() llm.LLMProvider {
 		panic(err)
 	}
 	return provider
+}
+
+func mustFakeChatProvider() llm.ChatLLMProvider {
+	return llm.NewFakeChatLLMProvider("改写后的测试问题")
+}
+
+func testRetrievalConfig() config.RetrievalConfig {
+	return config.RetrievalConfig{TopK: 5, SimilarityThreshold: 0.55}
 }
 
 type failingLLMProvider struct{}
@@ -570,31 +904,266 @@ func (failingLLMProvider) EmbeddingModel() string {
 	return "failing-embedding"
 }
 
-func (r *memoryDocumentRepository) Save(_ context.Context, document model.DocumentUpload, _ string, chunks []model.DocumentChunk) error {
+type recoverableLLMProvider struct {
+	mu       sync.Mutex
+	fail     bool
+	calls    int
+	delegate llm.LLMProvider
+}
+
+func newRecoverableLLMProvider(fail bool) *recoverableLLMProvider {
+	return &recoverableLLMProvider{fail: fail, delegate: mustFakeProvider()}
+}
+
+func (p *recoverableLLMProvider) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
+	p.mu.Lock()
+	p.calls++
+	fail := p.fail
+	p.mu.Unlock()
+	if fail {
+		return nil, errors.New("simulated recoverable embedding failure")
+	}
+	return p.delegate.Embed(ctx, inputs)
+}
+
+func (p *recoverableLLMProvider) EmbeddingModel() string {
+	return "recoverable-embedding"
+}
+
+func (p *recoverableLLMProvider) setFail(fail bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fail = fail
+}
+
+func (p *recoverableLLMProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type memoryConversationLogger struct {
+	mu   sync.Mutex
+	logs []model.ConversationLog
+	err  error
+}
+
+func newMemoryConversationLogger() *memoryConversationLogger {
+	return &memoryConversationLogger{}
+}
+
+func (l *memoryConversationLogger) Log(_ context.Context, entry model.ConversationLog) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return l.err
+	}
+	citations := make([]string, len(entry.CitationDocuments))
+	copy(citations, entry.CitationDocuments)
+	entry.CitationDocuments = citations
+	l.logs = append(l.logs, entry)
+	return nil
+}
+
+func (l *memoryConversationLogger) entries() []model.ConversationLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entries := append([]model.ConversationLog(nil), l.logs...)
+	for index := range entries {
+		citations := make([]string, len(entries[index].CitationDocuments))
+		copy(citations, entries[index].CitationDocuments)
+		entries[index].CitationDocuments = citations
+	}
+	return entries
+}
+
+func (r *memoryDocumentRepository) Save(
+	_ context.Context,
+	document model.DocumentUpload,
+	storedName, contentHash string,
+	chunks []model.DocumentChunk,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	document.StoredName = storedName
+	document.ContentHash = contentHash
 	r.documents = append(r.documents, document)
+	r.chunks[document.ID] = append([]model.DocumentChunk(nil), chunks...)
+	r.hashes[contentHash] = document.ID
+	return nil
+}
+
+func (r *memoryDocumentRepository) SaveFailure(
+	_ context.Context,
+	document model.DocumentUpload,
+	storedName, contentHash string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	document.StoredName = storedName
+	document.ContentHash = contentHash
+	r.documents = append(r.documents, document)
+	r.hashes[contentHash] = document.ID
+	return nil
+}
+
+func (r *memoryDocumentRepository) ReplaceProcessed(
+	_ context.Context,
+	document model.DocumentUpload,
+	chunks []model.DocumentChunk,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	index := r.documentIndex(document.ID)
+	if index < 0 {
+		return errors.New("document not found")
+	}
+	document.StoredName = r.documents[index].StoredName
+	document.ContentHash = r.documents[index].ContentHash
+	r.documents[index] = document
 	r.chunks[document.ID] = append([]model.DocumentChunk(nil), chunks...)
 	return nil
 }
 
-func (r *memoryDocumentRepository) List(_ context.Context) ([]model.DocumentUpload, error) {
+func (r *memoryDocumentRepository) UpdateProcessingError(
+	_ context.Context,
+	documentID, status, extractionStatus, processingError string,
+	updatedAt time.Time,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	documents := append([]model.DocumentUpload(nil), r.documents...)
+	index := r.documentIndex(documentID)
+	if index < 0 {
+		return errors.New("document not found")
+	}
+	r.documents[index].Status = status
+	r.documents[index].ExtractionStatus = extractionStatus
+	r.documents[index].ProcessingError = processingError
+	r.documents[index].UpdatedAt = updatedAt
+	return nil
+}
+
+func (r *memoryDocumentRepository) FindByID(_ context.Context, documentID string) (model.DocumentUpload, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	index := r.documentIndex(documentID)
+	if index < 0 {
+		return model.DocumentUpload{}, false, nil
+	}
+	return r.documents[index], true, nil
+}
+
+func (r *memoryDocumentRepository) FindByContentHash(_ context.Context, contentHash string) (model.DocumentUpload, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	documentID, exists := r.hashes[contentHash]
+	if !exists {
+		return model.DocumentUpload{}, false, nil
+	}
+	index := r.documentIndex(documentID)
+	if index < 0 {
+		return model.DocumentUpload{}, false, nil
+	}
+	return r.documents[index], true, nil
+}
+
+func (r *memoryDocumentRepository) Delete(_ context.Context, documentID string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	index := r.documentIndex(documentID)
+	if index < 0 {
+		return false, nil
+	}
+	delete(r.hashes, r.documents[index].ContentHash)
+	delete(r.chunks, documentID)
+	r.documents = append(r.documents[:index], r.documents[index+1:]...)
+	return true, nil
+}
+
+func (r *memoryDocumentRepository) List(_ context.Context, filter model.DocumentListFilter) (model.DocumentListResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	documents := make([]model.DocumentUpload, 0, len(r.documents))
+	for _, document := range r.documents {
+		if filter.Category != "" && document.Category != filter.Category {
+			continue
+		}
+		if filter.Type != "" && document.Type != filter.Type {
+			continue
+		}
+		if filter.Permission != "" && document.Permission != filter.Permission {
+			continue
+		}
+		if filter.Status != "" && document.Status != filter.Status {
+			continue
+		}
+		if filter.Query != "" && !strings.Contains(strings.ToLower(document.OriginalName), strings.ToLower(filter.Query)) {
+			continue
+		}
+		documents = append(documents, document)
+	}
 	sort.Slice(documents, func(left, right int) bool {
 		if documents[left].UploadedAt.Equal(documents[right].UploadedAt) {
 			return documents[left].ID > documents[right].ID
 		}
 		return documents[left].UploadedAt.After(documents[right].UploadedAt)
 	})
-	return documents, nil
+	total := len(documents)
+	start := (filter.Page - 1) * filter.PageSize
+	if start > total {
+		start = total
+	}
+	end := start + filter.PageSize
+	if end > total {
+		end = total
+	}
+	pageDocuments := append([]model.DocumentUpload(nil), documents[start:end]...)
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + filter.PageSize - 1) / filter.PageSize
+	}
+	return model.DocumentListResult{
+		Documents:  pageDocuments,
+		Total:      total,
+		Page:       filter.Page,
+		PageSize:   filter.PageSize,
+		TotalPages: totalPages,
+	}, nil
+}
+
+func (r *memoryDocumentRepository) SearchSimilar(_ context.Context, _ []float32, _ string, permissions []string, limit int) ([]model.RetrievedChunk, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	allowed := make(map[string]struct{}, len(permissions))
+	for _, permission := range permissions {
+		allowed[permission] = struct{}{}
+	}
+	results := make([]model.RetrievedChunk, 0, limit)
+	for _, result := range r.searchResults {
+		if _, ok := allowed[result.Permission]; !ok {
+			continue
+		}
+		results = append(results, result)
+		if len(results) == limit {
+			break
+		}
+	}
+	return results, nil
 }
 
 func (r *memoryDocumentRepository) chunksFor(documentID string) []model.DocumentChunk {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]model.DocumentChunk(nil), r.chunks[documentID]...)
+}
+
+func (r *memoryDocumentRepository) documentIndex(documentID string) int {
+	for index := range r.documents {
+		if r.documents[index].ID == documentID {
+			return index
+		}
+	}
+	return -1
 }
 
 func minimalTextPDF(text string) []byte {

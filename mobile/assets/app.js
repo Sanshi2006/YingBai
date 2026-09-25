@@ -124,7 +124,7 @@ async function sendMessage(rawText, appendUser = true) {
   const typing = appendTyping();
 
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 12000);
+  const timeout = window.setTimeout(() => controller.abort(), 60000);
   const minimumLoading = new Promise((resolve) => window.setTimeout(resolve, 420));
 
   try {
@@ -146,11 +146,20 @@ async function sendMessage(rawText, appendUser = true) {
     }
 
     typing.remove();
-    appendMessage({ type: "assistant", text: payload.answer || "已收到你的消息" });
+    appendMessage({
+      type: "assistant",
+      text: payload.answer || "已收到你的消息",
+      citations: Array.isArray(payload.citations) ? payload.citations : [],
+    });
     setConnectionState(true);
   } catch (error) {
     typing.remove();
-    const reason = error.name === "AbortError" ? "请求超时，请稍后重试" : "消息发送失败，请检查网络后重试";
+    const reason =
+      error.name === "AbortError"
+        ? "请求超时，请稍后重试"
+        : error.message && error.message !== "Failed to fetch"
+          ? error.message
+          : "消息发送失败，请检查网络后重试";
     appendError(reason, text);
     setConnectionState(false);
   } finally {
@@ -180,7 +189,7 @@ function setConnectionState(online) {
   networkBanner.hidden = online;
 }
 
-function appendMessage({ type, text }) {
+function appendMessage({ type, text, citations = [] }) {
   const row = document.createElement("article");
   row.className = `message-row ${type}`;
 
@@ -194,7 +203,14 @@ function appendMessage({ type, text }) {
 
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
-  bubble.textContent = text;
+  const copy = document.createElement("span");
+  copy.className = "message-copy";
+  copy.textContent = text;
+  bubble.append(copy);
+
+  if (type === "assistant" && citations.length > 0) {
+    bubble.append(createCitationDetails(citations));
+  }
 
   const time = document.createElement("time");
   time.className = "message-time";
@@ -206,6 +222,35 @@ function appendMessage({ type, text }) {
   messageList.append(row);
   scrollToLatest();
   return row;
+}
+
+function createCitationDetails(citations) {
+  const uniqueSources = [];
+  const seen = new Set();
+  citations.forEach((citation) => {
+    const filename = String(citation?.originalName || "").trim();
+    if (!filename) return;
+    const key = String(citation?.documentId || filename);
+    if (seen.has(key)) return;
+    seen.add(key);
+    uniqueSources.push(filename);
+  });
+
+  const details = document.createElement("details");
+  details.className = "citation-details";
+  const summary = document.createElement("summary");
+  summary.textContent = `引用来源（${uniqueSources.length}）`;
+  details.append(summary);
+
+  const list = document.createElement("ul");
+  list.className = "citation-list";
+  uniqueSources.forEach((filename) => {
+    const item = document.createElement("li");
+    item.textContent = filename;
+    list.append(item);
+  });
+  details.append(list);
+  return details;
 }
 
 function appendTyping() {
