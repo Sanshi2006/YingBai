@@ -29,7 +29,7 @@ func TestRAGAnswerServiceRunsRewriteRetrievalPromptAndAnswer(t *testing.T) {
 		t.Fatalf("NewRAGAnswerService() error = %v", err)
 	}
 
-	answer, err := answerService.Answer(context.Background(), "包装破了咋办？", "customer")
+	answer, err := answerService.Answer(context.Background(), "包装破了咋办？", "customer", nil)
 	if err != nil {
 		t.Fatalf("Answer() error = %v", err)
 	}
@@ -60,7 +60,7 @@ func TestRAGAnswerServiceRefusesBelowThresholdWithoutAnswerCall(t *testing.T) {
 		t.Fatalf("NewRAGAnswerService() error = %v", err)
 	}
 
-	answer, err := answerService.Answer(context.Background(), "无关问题", "customer")
+	answer, err := answerService.Answer(context.Background(), "无关问题", "customer", nil)
 	if err != nil {
 		t.Fatalf("Answer() error = %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRAGAnswerServicePropagatesAnswerFailure(t *testing.T) {
 		t.Fatalf("NewRAGAnswerService() error = %v", err)
 	}
 
-	_, err = answerService.Answer(context.Background(), "问题", "customer")
+	_, err = answerService.Answer(context.Background(), "问题", "customer", nil)
 	if !errors.Is(err, ErrRAGAnswerGeneration) {
 		t.Fatalf("error = %v, want ErrRAGAnswerGeneration", err)
 	}

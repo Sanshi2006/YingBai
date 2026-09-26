@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestRAGPreparationServiceRewritesRetrievesAndBuildsGroundedPrompt(t *testin
 		t.Fatalf("NewRAGPreparationService() error = %v", err)
 	}
 
-	preparation, err := service.Prepare(context.Background(), " 包装破了咋办？ ", "customer")
+	preparation, err := service.Prepare(context.Background(), " 包装破了咋办？ ", "customer", nil)
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -58,7 +59,7 @@ func TestRAGPreparationServiceDoesNotBuildAnswerPromptWithoutKnowledge(t *testin
 		t.Fatalf("NewRAGPreparationService() error = %v", err)
 	}
 
-	preparation, err := service.Prepare(context.Background(), "没有命中的问题", "customer")
+	preparation, err := service.Prepare(context.Background(), "没有命中的问题", "customer", nil)
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -75,7 +76,7 @@ func TestRAGPreparationServiceRejectsInvalidQuestionBeforeCallingLLM(t *testing.
 		t.Fatalf("NewRAGPreparationService() error = %v", err)
 	}
 
-	if _, err := service.Prepare(context.Background(), "   ", "customer"); !errors.Is(err, ErrRAGQuestionRequired) {
+	if _, err := service.Prepare(context.Background(), "   ", "customer", nil); !errors.Is(err, ErrRAGQuestionRequired) {
 		t.Fatalf("error = %v, want ErrRAGQuestionRequired", err)
 	}
 	if len(chatLLM.Requests()) != 0 || retriever.calls != 0 {
@@ -84,9 +85,48 @@ func TestRAGPreparationServiceRejectsInvalidQuestionBeforeCallingLLM(t *testing.
 }
 
 func TestBuildGroundedAnswerMessagesRejectsIncompleteChunk(t *testing.T) {
-	_, err := BuildGroundedAnswerMessages("问题", "改写问题", []model.RetrievedChunk{{DocumentID: "doc-1"}})
+	_, err := BuildGroundedAnswerMessages("问题", "改写问题", []model.RetrievedChunk{{DocumentID: "doc-1"}}, nil)
 	if !errors.Is(err, ErrGroundedPrompt) {
 		t.Fatalf("error = %v, want ErrGroundedPrompt", err)
+	}
+}
+
+func TestRAGPreparationServiceCarriesOnlyLatestFiveConversationTurns(t *testing.T) {
+	chatLLM := llm.NewFakeChatLLMProvider("结合上下文改写后的问题")
+	retriever := &capturingKnowledgeRetriever{results: []model.RetrievedChunk{{
+		DocumentID: "doc-history", OriginalName: "连续问答.md", Permission: "公开",
+		Content: "当前问题对应的授权知识。", Similarity: 0.9,
+	}}}
+	service, err := NewRAGPreparationService(chatLLM, retriever, config.RetrievalConfig{TopK: 5, SimilarityThreshold: 0.55})
+	if err != nil {
+		t.Fatalf("NewRAGPreparationService() error = %v", err)
+	}
+	history := make([]model.ConversationLog, 0, 7)
+	for index := 1; index <= 7; index++ {
+		history = append(history, model.ConversationLog{
+			Question: fmt.Sprintf("history-question-%d", index),
+			Answer:   fmt.Sprintf("history-answer-%d", index),
+		})
+	}
+
+	preparation, err := service.Prepare(context.Background(), "那它的时效呢？", "customer", history)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	requests := chatLLM.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("rewrite request count = %d, want 1", len(requests))
+	}
+	prompts := []string{requests[0][1].Content, preparation.AnswerMessages[1].Content}
+	for _, prompt := range prompts {
+		for index := 3; index <= 7; index++ {
+			if !strings.Contains(prompt, fmt.Sprintf("history-question-%d", index)) {
+				t.Fatalf("prompt is missing recent turn %d: %s", index, prompt)
+			}
+		}
+		if strings.Contains(prompt, "history-question-1") || strings.Contains(prompt, "history-question-2") {
+			t.Fatalf("prompt contains a turn older than the latest five: %s", prompt)
+		}
 	}
 }
 

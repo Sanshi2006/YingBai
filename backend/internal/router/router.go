@@ -44,7 +44,11 @@ func New(
 	if err != nil {
 		panic("configure RAG answer service: " + err.Error())
 	}
-	chatHandler := handler.NewChatHandler(answerService, conversationLogger)
+	chatService, err := service.NewChatService(answerService, service.NewMockLIMSClient())
+	if err != nil {
+		panic("configure chat service: " + err.Error())
+	}
+	chatHandler := handler.NewChatHandler(chatService, conversationLogger)
 	engine.POST("/chat", chatHandler.Chat)
 	documentHandler := handler.NewDocumentHandler(service.NewDocumentService(uploadDir, documentRepository, embeddingProvider))
 	engine.POST("/api/v1/documents", documentHandler.Upload)

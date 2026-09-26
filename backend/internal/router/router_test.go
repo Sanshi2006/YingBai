@@ -140,6 +140,143 @@ func TestChatReturnsKnowledgeAnswerWithCitations(t *testing.T) {
 	}
 }
 
+func TestChatReturnsStructuredMockOrderWithoutCallingLLM(t *testing.T) {
+	chatProvider := llm.NewFakeChatLLMProvider()
+	conversationLogger := newMemoryConversationLogger()
+	engine := router.New(
+		"", t.TempDir(), newMemoryDocumentRepository(), conversationLogger,
+		mustFakeProvider(), chatProvider, testRetrievalConfig(),
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(
+		`{"message":"麻烦查一下订单 ORD2026001","sessionId":"order-session","role":"customer"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Type      string        `json:"type"`
+		Citations []interface{} `json:"citations"`
+		Order     *struct {
+			Found        bool   `json:"found"`
+			Mock         bool   `json:"mock"`
+			OrderNumber  string `json:"orderNumber"`
+			Status       string `json:"status"`
+			Progress     int    `json:"progress"`
+			ReportStatus string `json:"reportStatus"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode order response: %v", err)
+	}
+	if body.Type != "order" || body.Order == nil || !body.Order.Found || !body.Order.Mock ||
+		body.Order.OrderNumber != "ORD2026001" || body.Order.Status != "检测中" ||
+		body.Order.Progress != 68 || body.Order.ReportStatus != "未生成" {
+		t.Fatalf("unexpected Mock order response: %#v", body)
+	}
+	if body.Citations == nil || len(body.Citations) != 0 {
+		t.Fatalf("order response should have empty citations: %#v", body.Citations)
+	}
+	if len(chatProvider.Requests()) != 0 {
+		t.Fatal("Mock order query should not call the Chat LLM")
+	}
+	logs := conversationLogger.entries()
+	if len(logs) != 1 || logs[0].AnswerType != "order" || len(logs[0].CitationDocuments) != 0 {
+		t.Fatalf("unexpected order conversation log: %#v", logs)
+	}
+}
+
+func TestChatReturnsExplicitMockOrderNotFoundState(t *testing.T) {
+	chatProvider := llm.NewFakeChatLLMProvider()
+	engine := router.New(
+		"", t.TempDir(), newMemoryDocumentRepository(), newMemoryConversationLogger(),
+		mustFakeProvider(), chatProvider, testRetrievalConfig(),
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(
+		`{"message":"查询订单 ORD9999999","sessionId":"missing-order-session","role":"service"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Answer string `json:"answer"`
+		Order  *struct {
+			Found        bool   `json:"found"`
+			OrderNumber  string `json:"orderNumber"`
+			Status       string `json:"status"`
+			ReportStatus string `json:"reportStatus"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode missing order response: %v", err)
+	}
+	if body.Order == nil || body.Order.Found || body.Order.OrderNumber != "ORD9999999" ||
+		body.Order.Status != "" || body.Order.ReportStatus != "" || !strings.Contains(body.Answer, "未查询到") {
+		t.Fatalf("unexpected not-found response: %#v", body)
+	}
+	if len(chatProvider.Requests()) != 0 {
+		t.Fatal("missing Mock order query should not call the Chat LLM")
+	}
+}
+
+func TestChatEnforcesKnowledgePermissionsForCustomerAndInternalRoles(t *testing.T) {
+	tests := []struct {
+		role          string
+		responses     []string
+		wantType      string
+		wantCitations int
+	}{
+		{role: "customer", responses: []string{"内部处理规则是什么？"}, wantType: "refusal", wantCitations: 0},
+		{role: "service", responses: []string{"内部处理规则是什么？", "客服可查看内部规则。[S1]"}, wantType: "knowledge", wantCitations: 1},
+		{role: "admin", responses: []string{"内部处理规则是什么？", "管理员可查看内部规则。[S1]"}, wantType: "knowledge", wantCitations: 1},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.role, func(t *testing.T) {
+			repository := newMemoryDocumentRepository()
+			repository.searchResults = []model.RetrievedChunk{{
+				DocumentID: "internal-only", OriginalName: "内部业务规范.md", Permission: "内部",
+				Content: "仅供内部人员使用的处理规则。", Similarity: 0.95,
+			}}
+			chatProvider := llm.NewFakeChatLLMProvider(testCase.responses...)
+			engine := router.New(
+				"", t.TempDir(), repository, newMemoryConversationLogger(),
+				mustFakeProvider(), chatProvider, testRetrievalConfig(),
+			)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(fmt.Sprintf(
+				`{"message":"内部规则是什么？","sessionId":"permission-%s","role":"%s"}`,
+				testCase.role, testCase.role,
+			)))
+			request.Header.Set("Content-Type", "application/json")
+
+			engine.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+			}
+			var body struct {
+				Type      string        `json:"type"`
+				Citations []interface{} `json:"citations"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode permission response: %v", err)
+			}
+			if body.Type != testCase.wantType || len(body.Citations) != testCase.wantCitations {
+				t.Fatalf("role %s received unexpected response: %#v", testCase.role, body)
+			}
+		})
+	}
+}
+
 func TestChatRejectsMissingMessage(t *testing.T) {
 	engine := newTestEngine("", t.TempDir())
 	recorder := httptest.NewRecorder()
@@ -198,6 +335,83 @@ func TestChatReturnsStableErrorWhenConversationLogFails(t *testing.T) {
 	assertErrorCode(t, recorder, "CHAT_LOG_FAILED")
 }
 
+func TestChatUsesLatestFiveTurnsFromSameSessionAndRole(t *testing.T) {
+	repository := newMemoryDocumentRepository()
+	repository.searchResults = []model.RetrievedChunk{{
+		DocumentID: "doc-follow-up", OriginalName: "检测时效.md", Permission: "公开",
+		Content: "该项目检测时效为五个工作日。", Similarity: 0.93,
+	}}
+	conversationLogger := newMemoryConversationLogger()
+	for index := 1; index <= 6; index++ {
+		if err := conversationLogger.Log(context.Background(), model.ConversationLog{
+			SessionID: "persisted-session", Role: "customer",
+			Question: fmt.Sprintf("customer-history-%d", index),
+			Answer:   fmt.Sprintf("customer-answer-%d", index), AnswerType: "knowledge",
+		}); err != nil {
+			t.Fatalf("seed customer history: %v", err)
+		}
+	}
+	if err := conversationLogger.Log(context.Background(), model.ConversationLog{
+		SessionID: "persisted-session", Role: "admin", Question: "admin-secret-question",
+		Answer: "admin-secret-answer", AnswerType: "knowledge",
+	}); err != nil {
+		t.Fatalf("seed admin history: %v", err)
+	}
+	chatProvider := llm.NewFakeChatLLMProvider("该项目的检测时效是多少？", "检测时效为五个工作日。[S1]")
+	engine := router.New("", t.TempDir(), repository, conversationLogger, mustFakeProvider(), chatProvider, testRetrievalConfig())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(
+		`{"message":"那它要多久？","sessionId":"persisted-session","role":"customer"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	requests := chatProvider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("chat LLM calls = %d, want rewrite + answer", len(requests))
+	}
+	for _, llmRequest := range requests {
+		prompt := llmRequest[len(llmRequest)-1].Content
+		for index := 2; index <= 6; index++ {
+			if !strings.Contains(prompt, fmt.Sprintf("customer-history-%d", index)) {
+				t.Fatalf("prompt is missing recent customer turn %d: %s", index, prompt)
+			}
+		}
+		if strings.Contains(prompt, "customer-history-1") || strings.Contains(prompt, "admin-secret") {
+			t.Fatalf("prompt contains expired or cross-role history: %s", prompt)
+		}
+	}
+}
+
+func TestChatReturnsStableErrorWhenConversationHistoryFails(t *testing.T) {
+	conversationLogger := newMemoryConversationLogger()
+	conversationLogger.historyErr = errors.New("simulated SQLite history failure")
+	chatProvider := mustFakeChatProvider()
+	engine := router.New(
+		"", t.TempDir(), newMemoryDocumentRepository(), conversationLogger,
+		mustFakeProvider(), chatProvider, testRetrievalConfig(),
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(
+		`{"message":"继续上一个问题","sessionId":"session-history-failure","role":"customer"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	engine.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+	}
+	assertErrorCode(t, recorder, "CHAT_HISTORY_FAILED")
+	if len(chatProvider.(*llm.FakeChatLLMProvider).Requests()) != 0 {
+		t.Fatal("history failure should stop before calling the chat LLM")
+	}
+}
+
 func TestMobileHome(t *testing.T) {
 	mobileDir, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile"))
 	if err != nil {
@@ -218,6 +432,91 @@ func TestMobileHome(t *testing.T) {
 	}
 	if recorder.Header().Get("Content-Security-Policy") == "" {
 		t.Fatal("mobile home did not include security headers")
+	}
+}
+
+func TestMobileChatPersistsSessionIDInLocalStorage(t *testing.T) {
+	appPath, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile", "assets", "app.js"))
+	if err != nil {
+		t.Fatalf("resolve mobile app script: %v", err)
+	}
+	appSource, err := os.ReadFile(appPath)
+	if err != nil {
+		t.Fatalf("read mobile app script: %v", err)
+	}
+	source := string(appSource)
+	for _, expected := range []string{
+		`sessionId: getOrCreateSessionId()`,
+		`localStorage.getItem("lab-chat-session-id")`,
+		`localStorage.setItem("lab-chat-session-id", sessionId)`,
+		`sessionId: state.sessionId`,
+	} {
+		if !strings.Contains(source, expected) {
+			t.Fatalf("mobile session persistence is missing %q", expected)
+		}
+	}
+}
+
+func TestMobileIncludesOrderCardAndDayFourQuickPrompts(t *testing.T) {
+	mobileDir, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile"))
+	if err != nil {
+		t.Fatalf("resolve mobile directory: %v", err)
+	}
+	files := map[string][]string{
+		filepath.Join(mobileDir, "index.html"): {
+			`data-prompt="查一下订单 ORD2026001">查订单`,
+			`data-prompt="常见检测标准有哪些？">常见标准`,
+			`data-prompt="请帮我转人工客服">转人工`,
+		},
+		filepath.Join(mobileDir, "assets", "app.js"): {
+			"order: payload.order || null", "function createOrderCard(order)", "Mock LIMS",
+		},
+		filepath.Join(mobileDir, "assets", "styles.css"): {
+			".order-card", ".order-progress", "min-height: 44px",
+		},
+	}
+	for path, expectedValues := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read mobile asset %s: %v", path, err)
+		}
+		for _, expected := range expectedValues {
+			if !strings.Contains(string(content), expected) {
+				t.Fatalf("mobile asset %s is missing %q", path, expected)
+			}
+		}
+	}
+}
+
+func TestMobileIncludesDayFiveInteractionStates(t *testing.T) {
+	mobileDir, err := filepath.Abs(filepath.Join("..", "..", "..", "mobile", "assets"))
+	if err != nil {
+		t.Fatalf("resolve mobile assets: %v", err)
+	}
+	files := map[string][]string{
+		filepath.Join(mobileDir, "app.js"): {
+			`window.visualViewport?.addEventListener("resize", syncVisualViewport)`,
+			`document.documentElement.style.setProperty("--app-height"`,
+			"function renderEmptyState()",
+			`label.textContent = "正在查询，请稍候"`,
+			`button.textContent = "正在重试…"`,
+			`if (!button || state.sending) return`,
+		},
+		filepath.Join(mobileDir, "styles.css"): {
+			"body.chat-active", ".chat-empty-state", ".chat-view.keyboard-open .quick-prompts",
+			"height: var(--app-height)",
+		},
+	}
+	for path, expectedValues := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read mobile asset %s: %v", path, err)
+		}
+		for _, expected := range expectedValues {
+			if !strings.Contains(string(content), expected) {
+				t.Fatalf("mobile Day 5 state handling in %s is missing %q", path, expected)
+			}
+		}
 	}
 }
 
@@ -943,9 +1242,10 @@ func (p *recoverableLLMProvider) callCount() int {
 }
 
 type memoryConversationLogger struct {
-	mu   sync.Mutex
-	logs []model.ConversationLog
-	err  error
+	mu         sync.Mutex
+	logs       []model.ConversationLog
+	err        error
+	historyErr error
 }
 
 func newMemoryConversationLogger() *memoryConversationLogger {
@@ -975,6 +1275,28 @@ func (l *memoryConversationLogger) entries() []model.ConversationLog {
 		entries[index].CitationDocuments = citations
 	}
 	return entries
+}
+
+func (l *memoryConversationLogger) ListRecentBySessionAndRole(
+	_ context.Context,
+	sessionID, role string,
+	limit int,
+) ([]model.ConversationLog, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.historyErr != nil {
+		return nil, l.historyErr
+	}
+	matches := make([]model.ConversationLog, 0, limit)
+	for _, entry := range l.logs {
+		if entry.SessionID == sessionID && entry.Role == role {
+			matches = append(matches, entry)
+		}
+	}
+	if len(matches) > limit {
+		matches = matches[len(matches)-limit:]
+	}
+	return append([]model.ConversationLog(nil), matches...), nil
 }
 
 func (r *memoryDocumentRepository) Save(

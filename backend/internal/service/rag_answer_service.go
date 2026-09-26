@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"project-for-yingbai/backend/internal/llm"
+	"project-for-yingbai/backend/internal/model"
 )
 
 const RAGRefusalAnswer = "知识库暂无依据，请转人工"
@@ -41,8 +42,8 @@ func NewRAGAnswerService(preparation *RAGPreparationService, chatLLM llm.ChatLLM
 	return &RAGAnswerService{preparation: preparation, chatLLM: chatLLM}, nil
 }
 
-func (s *RAGAnswerService) Answer(ctx context.Context, question, role string) (RAGAnswer, error) {
-	preparation, err := s.preparation.Prepare(ctx, question, role)
+func (s *RAGAnswerService) Answer(ctx context.Context, question, role string, history []model.ConversationLog) (RAGAnswer, error) {
+	preparation, err := s.preparation.Prepare(ctx, question, role, history)
 	if err != nil {
 		return RAGAnswer{}, err
 	}

@@ -20,11 +20,12 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Answer    string                `json:"answer"`
-	Type      string                `json:"type"`
-	SessionID string                `json:"sessionId,omitempty"`
-	Role      string                `json:"role,omitempty"`
-	Citations []service.RAGCitation `json:"citations"`
+	Answer    string                    `json:"answer"`
+	Type      string                    `json:"type"`
+	SessionID string                    `json:"sessionId,omitempty"`
+	Role      string                    `json:"role,omitempty"`
+	Citations []service.RAGCitation     `json:"citations"`
+	Order     *service.OrderQueryResult `json:"order,omitempty"`
 }
 
 type errorBody struct {
@@ -36,20 +37,21 @@ type errorResponse struct {
 	Error errorBody `json:"error"`
 }
 
-type RAGAnswerer interface {
-	Answer(ctx context.Context, question, role string) (service.RAGAnswer, error)
+type ChatAnswerer interface {
+	Answer(ctx context.Context, question, role string, history []model.ConversationLog) (service.ChatAnswer, error)
 }
 
 type ConversationLogger interface {
 	Log(ctx context.Context, entry model.ConversationLog) error
+	ListRecentBySessionAndRole(ctx context.Context, sessionID, role string, limit int) ([]model.ConversationLog, error)
 }
 
 type ChatHandler struct {
-	answerer RAGAnswerer
+	answerer ChatAnswerer
 	logger   ConversationLogger
 }
 
-func NewChatHandler(answerer RAGAnswerer, logger ConversationLogger) *ChatHandler {
+func NewChatHandler(answerer ChatAnswerer, logger ConversationLogger) *ChatHandler {
 	if answerer == nil {
 		panic("RAG answerer is not configured")
 	}
@@ -73,13 +75,25 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		writeInvalidRequest(c)
 		return
 	}
-	answer, err := h.answerer.Answer(c.Request.Context(), request.Message, request.Role)
+	history, err := h.logger.ListRecentBySessionAndRole(
+		c.Request.Context(), request.SessionID, request.Role, service.MaxConversationHistoryTurns,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: errorBody{
+			Code:    "CHAT_HISTORY_FAILED",
+			Message: "会话历史读取失败，请稍后重试",
+		}})
+		return
+	}
+	answer, err := h.answerer.Answer(c.Request.Context(), request.Message, request.Role, history)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrRAGQuestionRequired), errors.Is(err, service.ErrRAGQuestionTooLong):
 			writeInvalidRequest(c)
 		case errors.Is(err, service.ErrInvalidRetrievalRole):
 			c.JSON(http.StatusBadRequest, errorResponse{Error: errorBody{Code: "INVALID_ROLE", Message: "role 必须是 customer、service 或 admin"}})
+		case errors.Is(err, service.ErrLIMSQueryFailed):
+			c.JSON(http.StatusBadGateway, errorResponse{Error: errorBody{Code: "LIMS_QUERY_FAILED", Message: "订单查询失败，请稍后重试"}})
 		default:
 			c.JSON(http.StatusBadGateway, errorResponse{Error: errorBody{Code: "RAG_PROCESSING_FAILED", Message: "知识问答处理失败，请稍后重试"}})
 		}
@@ -120,6 +134,7 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		SessionID: request.SessionID,
 		Role:      request.Role,
 		Citations: answer.Citations,
+		Order:     answer.Order,
 	})
 }
 

@@ -2,6 +2,7 @@ package repository_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -68,5 +69,72 @@ func TestSQLiteConversationLogRepositoryPersistsCompletedTurns(t *testing.T) {
 		logs[1].CitationDocuments == nil || len(logs[1].CitationDocuments) != 0 ||
 		!logs[1].CreatedAt.Equal(secondTime) {
 		t.Fatalf("unexpected refusal log: %#v", logs[1])
+	}
+}
+
+func TestSQLiteConversationLogRepositoryListsLatestFiveTurnsBySessionAndRole(t *testing.T) {
+	ctx := context.Background()
+	sqliteDatabase, err := database.OpenSQLite(ctx, filepath.Join(t.TempDir(), "conversations.db"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	defer sqliteDatabase.Close()
+	repository := repository.NewSQLiteConversationLogRepository(sqliteDatabase)
+	baseTime := time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC)
+	for index := 1; index <= 7; index++ {
+		if err := repository.Log(ctx, model.ConversationLog{
+			SessionID:  "continued-session",
+			Role:       "customer",
+			Question:   fmt.Sprintf("customer-question-%d", index),
+			Answer:     fmt.Sprintf("customer-answer-%d", index),
+			AnswerType: "knowledge",
+			CreatedAt:  baseTime.Add(time.Duration(index) * time.Minute),
+		}); err != nil {
+			t.Fatalf("write customer turn %d: %v", index, err)
+		}
+	}
+	if err := repository.Log(ctx, model.ConversationLog{
+		SessionID: "continued-session", Role: "admin", Question: "internal-question",
+		Answer: "internal-answer", AnswerType: "knowledge", CreatedAt: baseTime.Add(8 * time.Minute),
+	}); err != nil {
+		t.Fatalf("write admin turn: %v", err)
+	}
+
+	logs, err := repository.ListRecentBySessionAndRole(ctx, "continued-session", "customer", 5)
+	if err != nil {
+		t.Fatalf("list recent customer turns: %v", err)
+	}
+	if len(logs) != 5 {
+		t.Fatalf("recent turn count = %d, want 5", len(logs))
+	}
+	for index, entry := range logs {
+		expected := fmt.Sprintf("customer-question-%d", index+3)
+		if entry.Question != expected || entry.Role != "customer" {
+			t.Fatalf("turn %d = %#v, want question %q for customer", index, entry, expected)
+		}
+	}
+}
+
+func TestSQLiteConversationLogRepositoryPersistsOrderAnswer(t *testing.T) {
+	ctx := context.Background()
+	sqliteDatabase, err := database.OpenSQLite(ctx, filepath.Join(t.TempDir(), "conversations.db"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	defer sqliteDatabase.Close()
+	repository := repository.NewSQLiteConversationLogRepository(sqliteDatabase)
+	if err := repository.Log(ctx, model.ConversationLog{
+		SessionID: "order-session", Role: "customer", Question: "查订单 ORD2026001",
+		Answer: "已查询到订单 ORD2026001 的 Mock 进度信息。", AnswerType: "order",
+		CreatedAt: time.Date(2026, time.September, 25, 13, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("persist order answer: %v", err)
+	}
+	logs, err := repository.ListBySession(ctx, "order-session")
+	if err != nil {
+		t.Fatalf("list order session: %v", err)
+	}
+	if len(logs) != 1 || logs[0].AnswerType != "order" || len(logs[0].CitationDocuments) != 0 {
+		t.Fatalf("unexpected order log: %#v", logs)
 	}
 }

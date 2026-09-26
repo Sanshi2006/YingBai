@@ -26,7 +26,10 @@ const state = {
   sessionId: getOrCreateSessionId(),
 };
 
+let viewportBaseline = window.innerHeight;
+
 restoreLastProfile();
+initializeViewportHandling();
 
 identityForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -71,52 +74,61 @@ messageInput.addEventListener("keydown", (event) => {
 
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await sendMessage(messageInput.value);
+  await sendMessage(messageInput.value, true, true);
 });
 
 quickPrompts.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-prompt]");
   if (!button || state.sending) return;
-  await sendMessage(button.dataset.prompt);
+  await sendMessage(button.dataset.prompt, true, false);
 });
 
 messageList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-retry]");
   if (!button || state.sending) return;
-  button.closest(".message-row")?.remove();
-  await sendMessage(button.dataset.retry, false);
+  const failedRow = button.closest(".message-row");
+  button.disabled = true;
+  button.textContent = "正在重试…";
+  await sendMessage(button.dataset.retry, false, false);
+  failedRow?.remove();
 });
 
 function openChat() {
   welcomeView.hidden = true;
   chatView.hidden = false;
+  document.body.classList.add("chat-active");
   identityBadge.textContent = roleLabels[state.profile.role] || "访客";
   messageList.replaceChildren();
   renderDayDivider();
-  appendMessage({
-    type: "assistant",
-    text: `${state.profile.displayName}，你好！我是智能客服。\n当前已进入${roleLabels[state.profile.role]}体验通道，可以发送一条消息确认服务连接。`,
-  });
+  renderEmptyState();
+  quickPrompts.hidden = false;
+  syncVisualViewport();
   checkHealth();
-  requestAnimationFrame(() => messageInput.focus({ preventScroll: true }));
+  if (window.matchMedia("(pointer: fine)").matches) {
+    requestAnimationFrame(() => messageInput.focus({ preventScroll: true }));
+  }
 }
 
 function openWelcome() {
   chatView.hidden = true;
   welcomeView.hidden = false;
+  document.body.classList.remove("chat-active");
+  chatView.classList.remove("keyboard-open");
   networkBanner.hidden = true;
   requestAnimationFrame(() => displayNameInput.focus({ preventScroll: true }));
 }
 
-async function sendMessage(rawText, appendUser = true) {
+async function sendMessage(rawText, appendUser = true, restoreInputFocus = true) {
   const text = rawText.trim();
   if (!text || state.sending) return;
 
   state.sending = true;
+  composer.setAttribute("aria-busy", "true");
   messageInput.value = "";
   resizeComposer();
   updateSendButton();
   quickPrompts.hidden = true;
+  messageList.querySelector(".chat-empty-state")?.remove();
 
   if (appendUser) {
     appendMessage({ type: "user", text });
@@ -150,6 +162,7 @@ async function sendMessage(rawText, appendUser = true) {
       type: "assistant",
       text: payload.answer || "已收到你的消息",
       citations: Array.isArray(payload.citations) ? payload.citations : [],
+      order: payload.order || null,
     });
     setConnectionState(true);
   } catch (error) {
@@ -165,8 +178,12 @@ async function sendMessage(rawText, appendUser = true) {
   } finally {
     window.clearTimeout(timeout);
     state.sending = false;
+    composer.setAttribute("aria-busy", "false");
     updateSendButton();
-    messageInput.focus({ preventScroll: true });
+    if (restoreInputFocus) {
+      messageInput.focus({ preventScroll: true });
+    }
+    scrollToLatest();
   }
 }
 
@@ -189,7 +206,7 @@ function setConnectionState(online) {
   networkBanner.hidden = online;
 }
 
-function appendMessage({ type, text, citations = [] }) {
+function appendMessage({ type, text, citations = [], order = null }) {
   const row = document.createElement("article");
   row.className = `message-row ${type}`;
 
@@ -212,6 +229,10 @@ function appendMessage({ type, text, citations = [] }) {
     bubble.append(createCitationDetails(citations));
   }
 
+  if (type === "assistant" && order) {
+    bubble.append(createOrderCard(order));
+  }
+
   const time = document.createElement("time");
   time.className = "message-time";
   time.dateTime = new Date().toISOString();
@@ -222,6 +243,67 @@ function appendMessage({ type, text, citations = [] }) {
   messageList.append(row);
   scrollToLatest();
   return row;
+}
+
+function createOrderCard(order) {
+  const found = order?.found === true;
+  const card = document.createElement("section");
+  card.className = `order-card${found ? "" : " not-found"}`;
+  card.setAttribute("aria-label", found ? "Mock 订单进度" : "Mock 订单未找到");
+
+  const header = document.createElement("div");
+  header.className = "order-card-header";
+  const heading = document.createElement("strong");
+  heading.textContent = found ? "订单进度" : "未找到订单";
+  const badge = document.createElement("span");
+  badge.textContent = "Mock LIMS";
+  header.append(heading, badge);
+
+  const orderNumber = document.createElement("p");
+  orderNumber.className = "order-number";
+  orderNumber.textContent = String(order?.orderNumber || "未提供订单号");
+  card.append(header, orderNumber);
+
+  if (!found) {
+    const note = document.createElement("p");
+    note.className = "order-not-found-note";
+    note.textContent = "请核对订单号后重新查询";
+    card.append(note);
+    return card;
+  }
+
+  const details = document.createElement("dl");
+  details.className = "order-details";
+  appendOrderField(details, "订单状态", order.status || "未知");
+  appendOrderField(details, "报告状态", order.reportStatus || "未知");
+  card.append(details);
+
+  const progressValue = Math.min(100, Math.max(0, Number(order.progress) || 0));
+  const progressHeader = document.createElement("div");
+  progressHeader.className = "order-progress-header";
+  const progressLabel = document.createElement("span");
+  progressLabel.textContent = "检测进度";
+  const progressText = document.createElement("strong");
+  progressText.textContent = `${progressValue}%`;
+  progressHeader.append(progressLabel, progressText);
+
+  const progress = document.createElement("progress");
+  progress.className = "order-progress";
+  progress.max = 100;
+  progress.value = progressValue;
+  progress.setAttribute("aria-label", `检测进度 ${progressValue}%`);
+  card.append(progressHeader, progress);
+  return card;
+}
+
+function appendOrderField(list, label, value) {
+  const group = document.createElement("div");
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const description = document.createElement("dd");
+  description.textContent = String(value);
+  group.append(term, description);
+  list.append(group);
 }
 
 function createCitationDetails(citations) {
@@ -267,9 +349,17 @@ function appendTyping() {
   const bubble = document.createElement("div");
   bubble.className = "message-bubble typing-bubble";
 
+  const label = document.createElement("span");
+  label.className = "typing-label";
+  label.textContent = "正在查询，请稍候";
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+
   for (let index = 0; index < 3; index += 1) {
-    bubble.append(document.createElement("span"));
+    dots.append(document.createElement("span"));
   }
+
+  bubble.append(label, dots);
 
   stack.append(bubble);
   row.append(avatar, stack);
@@ -302,6 +392,22 @@ function renderDayDivider() {
   messageList.append(divider);
 }
 
+function renderEmptyState() {
+  const empty = document.createElement("section");
+  empty.className = "chat-empty-state";
+  empty.setAttribute("aria-label", "开始新对话");
+
+  const mark = document.createElement("div");
+  mark.className = "empty-state-mark";
+  mark.textContent = "AI";
+  const title = document.createElement("h2");
+  title.textContent = `${state.profile.displayName}，想了解什么？`;
+  const description = document.createElement("p");
+  description.textContent = `当前为${roleLabels[state.profile.role]}通道，可以咨询检测知识或查询订单。`;
+  empty.append(mark, title, description);
+  messageList.append(empty);
+}
+
 function resizeComposer() {
   messageInput.style.height = "auto";
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 112)}px`;
@@ -315,6 +421,37 @@ function scrollToLatest() {
   requestAnimationFrame(() => {
     messageList.scrollTop = messageList.scrollHeight;
   });
+}
+
+function initializeViewportHandling() {
+  window.addEventListener("resize", syncVisualViewport);
+  window.visualViewport?.addEventListener("resize", syncVisualViewport);
+  window.visualViewport?.addEventListener("scroll", syncVisualViewport);
+  messageInput.addEventListener("focus", () => {
+    window.setTimeout(() => {
+      syncVisualViewport();
+      scrollToLatest();
+    }, 160);
+  });
+  messageInput.addEventListener("blur", () => {
+    window.setTimeout(syncVisualViewport, 80);
+  });
+  syncVisualViewport();
+}
+
+function syncVisualViewport() {
+  const viewportHeight = Math.round(window.visualViewport?.height || window.innerHeight);
+  document.documentElement.style.setProperty("--app-height", `${viewportHeight}px`);
+
+  const inputFocused = document.activeElement === messageInput;
+  if (!inputFocused) {
+    viewportBaseline = Math.max(viewportBaseline, viewportHeight);
+  }
+  const keyboardOpen = inputFocused && viewportBaseline - viewportHeight > 120;
+  chatView.classList.toggle("keyboard-open", keyboardOpen);
+  if (keyboardOpen && !chatView.hidden) {
+    scrollToLatest();
+  }
 }
 
 function formatTime(date) {

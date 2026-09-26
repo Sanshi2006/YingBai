@@ -67,7 +67,41 @@ func (r *SQLiteConversationLogRepository) ListBySession(ctx context.Context, ses
 		return nil, fmt.Errorf("query conversation logs: %w", err)
 	}
 	defer rows.Close()
+	return scanConversationLogs(rows)
+}
 
+func (r *SQLiteConversationLogRepository) ListRecentBySessionAndRole(
+	ctx context.Context,
+	sessionID, role string,
+	limit int,
+) ([]model.ConversationLog, error) {
+	if r == nil || r.database == nil {
+		return nil, errors.New("conversation log database is not configured")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	role = strings.TrimSpace(role)
+	if sessionID == "" || role == "" || limit <= 0 {
+		return nil, errors.New("recent conversation query is invalid")
+	}
+	rows, err := r.database.QueryContext(ctx, `
+		SELECT id, session_id, role, question, answer, answer_type, citation_documents, created_at
+		FROM (
+			SELECT id, session_id, role, question, answer, answer_type, citation_documents, created_at
+			FROM conversation_logs
+			WHERE session_id = ? AND role = ?
+			ORDER BY created_at DESC, id DESC
+			LIMIT ?
+		) AS recent_turns
+		ORDER BY created_at ASC, id ASC
+	`, sessionID, role, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query recent conversation logs: %w", err)
+	}
+	defer rows.Close()
+	return scanConversationLogs(rows)
+}
+
+func scanConversationLogs(rows *sql.Rows) ([]model.ConversationLog, error) {
 	logs := make([]model.ConversationLog, 0)
 	for rows.Next() {
 		var entry model.ConversationLog
@@ -80,10 +114,11 @@ func (r *SQLiteConversationLogRepository) ListBySession(ctx context.Context, ses
 		if err := json.Unmarshal([]byte(serializedCitations), &entry.CitationDocuments); err != nil {
 			return nil, fmt.Errorf("decode conversation log citations: %w", err)
 		}
-		entry.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+		parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("decode conversation log timestamp: %w", err)
 		}
+		entry.CreatedAt = parsedCreatedAt
 		logs = append(logs, entry)
 	}
 	if err := rows.Err(); err != nil {
